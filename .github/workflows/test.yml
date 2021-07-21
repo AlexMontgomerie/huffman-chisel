@@ -19,6 +19,9 @@ jobs:
         uses: jodersky/setup-mill@v0.2.3
         with:
           mill-version: 0.9.7
+      - name: Install Verilator
+        run: |
+          sudo apt-get install verilator
       - name: Cache Scala
         uses: coursier/cache-action@v5
       - name: SBT Test
