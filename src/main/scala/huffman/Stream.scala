@@ -3,7 +3,7 @@
 /** Wrappers for ready-valid (Stream) interfaces and associated circuit generators using them.
   */
 
-package rle
+package huffman
 
 import chisel3._
 import chisel3.experimental.{DataMirror, Direction, requireIsChiselType}

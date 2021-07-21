@@ -1,7 +1,7 @@
-package huffman.encoder_test
+package huffman.decoder_test
 
-import huffman.Encoder
-import huffman.BufferedEncoder
+import huffman.Decoder
+import huffman.BufferedDecoder
 import huffman.test.StreamDriver
 
 import org.scalatest._
@@ -14,7 +14,7 @@ import chiseltest.experimental.TestOptionBuilder._
 import chiseltest.internal.VerilatorBackendAnnotation
 import chiseltest.internal.WriteVcdAnnotation
 
-class EncoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
+class DecoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
 
   // function to run tests
   def run_test (seq_in: Seq[UInt], seq_out: Seq[UInt], description: String) {
@@ -22,10 +22,10 @@ class EncoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
     // testing annotations
     val annotations = Seq(VerilatorBackendAnnotation,WriteVcdAnnotation)
 
-    behavior of "Encoder"
-    it should s"be correct for $description (Encoder)" in {
+    behavior of "Decoder"
+    it should s"be correct for $description (Decoder)" in {
       // create the DUT
-      test(new Encoder(UInt(8.W), 256, 10, 4,
+      test(new BufferedDecoder(UInt(8.W), 256, 10, 4,
         "examples/code_table.dat", "examples/len_table.dat")).withAnnotations(annotations) { c =>
 
         // convert to stream interfaces to StreamDriver
@@ -41,6 +41,8 @@ class EncoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
           in.enqueueSeq(seq_in),
           out.expectDequeueSeq(seq_out)
         )
+        // c.io.out.ready.poke(true.B)
+        // fork { in.enqueueSeq(seq_in) }.join
 
       }
     }
@@ -48,18 +50,18 @@ class EncoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
 
   // create test sequences
   var description = "a stream of only zeros"
-  var seq_in = Seq(0.U, 0.U, 0.U, 0.U)
-  var seq_out = Seq(0.U, 0.U)
+  var seq_in = Seq(0.U, 0.U)
+  var seq_out = Seq(0.U, 0.U, 0.U, 0.U)
   run_test(seq_in, seq_out, description)
 
   description = "a stream of only ones"
-  seq_in = Seq(0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01).map(_.U)
-  seq_out = Seq(0x04, 0x41, 0x10, 0x4, 0x41, 0x10).map(_.U)
+  seq_in = Seq(0x04, 0x41, 0x10, 0x4, 0x41, 0x10, 0x4, 0x41, 0x10, 0x4, 0x41, 0x10).map(_.U)
+  seq_out = Seq(0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01).map(_.U)
   run_test(seq_in, seq_out, description)
 
   description = "a stream of alternating zeros and ones"
-  seq_in = Seq(0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00).map(_.U)
-  seq_out = Seq(0x04, 0x10, 0x40, 0x00, 0x01).map(_.U)
+  seq_in = Seq(0x04, 0x10, 0x40, 0x00, 0x01).map(_.U)
+  seq_out = Seq(0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00).map(_.U)
   run_test(seq_in, seq_out, description)
 
 }
