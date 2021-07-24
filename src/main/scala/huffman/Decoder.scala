@@ -1,18 +1,15 @@
 package huffman
 
+import scala.io.Source
+
 import math._
 import chisel3._
 import chisel3.util._
 import chisel3.experimental.ChiselEnum
-import chisel3.util.experimental.loadMemoryFromFileInline
 import firrtl.FileUtils
 
-object DecoderState extends ChiselEnum {
-  val FILL, FULL, DUMP = Value
-}
-
 object BufferState extends ChiselEnum {
-  val EMPTY, FILL, FULL, DONE = Value
+  val FILL, FULL = Value
 }
 
 class DecoderIO[T <: UInt](gen: T) extends Bundle {
@@ -20,30 +17,66 @@ class DecoderIO[T <: UInt](gen: T) extends Bundle {
   val out = Stream(gen)
 }
 
-class Decoder[T <: UInt](gen: T, size: Int, code_width: Int, len_width: Int, code_file: String, len_file: String) extends Module {
+class LookUpTable[T <: UInt](gen: T, code_data: Seq[(Int,Int)]) extends Module {
+
+  // define the IO
+  val io = IO(new Bundle {
+    val in    = Input(gen)
+    val out   = Output(UInt(8.W))
+    val valid = Output(Bool())
+  })
+
+  // generate the LUT
+  var context = {
+    val (code, data) = code_data.head
+    when(io.in === code.U) {
+      io.out := data.U
+      io.valid := true.B
+    }
+  }
+  for((code, data) <- code_data.tail) {
+    context = context.elsewhen(io.in === code.U) {
+      io.out := data.U
+      io.valid := true.B
+    }
+  }
+  context.otherwise {
+    io.out := 0.U
+    io.valid := false.B
+  }
+}
+
+class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Module {
+
+  // bit mask for correctly comparing code buffer
+  val mask = (x: Int) => ((1<<x)-1).U
+
+  // scale for size of buffer
+  val buffer_scale = 3
+
+  // parse the code and len tables
+  val codes = FileUtils.getLines(code_file)
+  val lens  = FileUtils.getLines(len_file)
 
   // get data widths
+  val code_width = lens.map(_.toInt).max
   val data_width = gen.getWidth
-  val ptr_width  = ( log(2*code_width) / log(2.0) ).ceil.toInt
+  val len_width  = ( log(code_width) / log(2.0) ).ceil.toInt
+  val ptr_width  = ( log(buffer_scale*code_width) / log(2.0) ).ceil.toInt
+
+  // get all the code, length, data tuples
+  val codes_lens = (codes zip lens).zipWithIndex.map(x => (x._1._1.toInt, x._1._2.toInt, x._2.toInt)).sortWith((a,b) => a._2 < a._2)
+
+  // create a buffer and pointer
+  val code_buffer_data  = RegInit(0.U((buffer_scale*code_width).W))
+  val code_buffer_ptr   = RegInit(0.U((ptr_width).W))
+
+  val next_code_buffer_data  = Wire(UInt((buffer_scale*code_width).W))
+  val next_code_buffer_ptr   = Wire(UInt((ptr_width).W))
+
 
   // initialise IO
   val io = IO(new DecoderIO(gen))
-
-  // create the code table from scala
-  val codes = FileUtils.getLines(code_file)
-  val lens  = FileUtils.getLines(len_file)
-  val codes_lens = (codes zip lens).zipWithIndex.map(x => (x._1._1.toInt, x._1._2.toInt, x._2.toInt)).sortWith((a,b) => a._2 < a._2)
-
-  // registers for data and length
-  val curr_data = RegInit(0.U(data_width.W))
-  val curr_len  = RegInit(0.U(len_width.W))
-
-  // store the previous data and length also
-  val prev_data = RegNext(curr_data)
-  val prev_len  = RegNext(curr_len)
-
-  // create the states for rle
-  val state = RegInit(DecoderState.FILL)
 
   // set defaults for IO
   io.out.bits   := DontCare
@@ -51,23 +84,54 @@ class Decoder[T <: UInt](gen: T, size: Int, code_width: Int, len_width: Int, cod
   io.out.last   := false.B
   io.in.ready   := true.B
 
-  // create a buffer and pointer
-  val code_buffer   = RegInit(0.U((3*code_width).W))
-  val code_pointer  = RegInit(0.U((ptr_width).W))
-
-  val next_code_buffer  = Wire(UInt((3*code_width).W))
-  val next_code_pointer = Wire(UInt((ptr_width).W))
-
   // registered input signals
   val input_bits  = io.in.bits
   val input_valid = io.in.valid
 
+  // initialise decoder for each width
+  val decoded_data  = RegInit(VecInit(Seq.fill(code_width)(0.U(code_width.W))))
+  val decoded_valid = RegInit(VecInit(Seq.fill(code_width)(false.B)))
+
+  // find out if any of the decoded words are valid
+  val one_decoded_valid = decoded_valid.reduce(_|_)
+
+  // create all the lookup tables
+  for ( i <- 1 to code_width ) {
+    // get the code data pairs
+    val code_data = codes_lens.filter(_._2 == i).map(x => (x._1, x._3))
+    // only create for lists with elements
+    if (!code_data.isEmpty) {
+      // create the LUT
+      val lut = Module(new LookUpTable(UInt(i.W), code_data))
+      // connect the input signal
+      lut.io.in := next_code_buffer_data
+      // connect up the decoded data and valid signal
+      decoded_data(i-1)   := lut.io.out
+      decoded_valid(i-1)  := lut.io.valid
+    }
+  }
+
+  // find the smallest decoded value
+  val index = PriorityEncoder(decoded_valid)
+
+  // get the current code word length
+  val curr_len = Wire(UInt(len_width.W))
+  when ( RegNext(input_valid) ) {
+    when ( one_decoded_valid && (code_buffer_ptr+data_width.U) >= index) {
+      curr_len := index + 1.U
+    } .otherwise {
+      curr_len := 0.U
+    }
+  } .otherwise {
+    when ( one_decoded_valid && code_buffer_ptr >= index ) {
+      curr_len := index + 1.U
+    } .otherwise {
+      curr_len := 0.U
+    }
+  }
+
   // create a state machine for the buffer
   val buffer_state = RegInit(BufferState.FILL)
-
-  // defaults for next signals
-  next_code_buffer   := code_buffer
-  next_code_pointer  := code_pointer
 
   // a latch to detect the last output
   val last_buffer = RegInit(false.B)
@@ -76,7 +140,7 @@ class Decoder[T <: UInt](gen: T, size: Int, code_width: Int, len_width: Int, cod
   }
 
   // last signal logic
-  when(last_buffer && (next_code_pointer === 0.U) ) {
+  when(last_buffer && (code_buffer_ptr === curr_len) ) {
     io.out.last := true.B
   } .otherwise {
     io.out.last := false.B
@@ -85,15 +149,34 @@ class Decoder[T <: UInt](gen: T, size: Int, code_width: Int, len_width: Int, cod
   // valid signal for the output
   val output_valid = RegInit(false.B)
 
+  // assign a wire for the next code buffer data and pointer
+  // next_code_buffer_data := ( code_buffer_data >> curr_len ) | ( ( input_bits << (code_buffer_ptr-curr_len) ) & mask(buffer_scale*code_width) )
+  next_code_buffer_data := ( code_buffer_data | ( input_bits << code_buffer_ptr ) ) >> curr_len
+  next_code_buffer_ptr  := code_buffer_ptr + data_width.U - curr_len
+
+  // // code buffer update logic
+  // when(input_valid && io.out.ready) {
+  //   when(code_buffer_ptr <= code_width.U) {
+  //     code_buffer_data := next_code_buffer_data
+  //     code_buffer_ptr  := next_code_buffer_ptr
+  //   } .otherwise {
+  //     code_buffer_data := code_buffer_data >> curr_len
+  //     code_buffer_ptr  := code_buffer_ptr - curr_len
+  //   }
+  // } .otherwise {
+  //   code_buffer_data := code_buffer_data
+  //   code_buffer_ptr  := code_buffer_ptr
+  // }
+
   switch(buffer_state) {
     is(BufferState.FILL) {
       when(input_valid && io.out.ready) {
         // only update the code buffer if the output is ready and the input is valid
-        next_code_buffer   := ( code_buffer | ( input_bits << code_pointer ) ) >> curr_len
-        next_code_pointer  := code_pointer + data_width.U - curr_len
+        code_buffer_data := next_code_buffer_data
+        code_buffer_ptr  := next_code_buffer_ptr
         // set the output signal to valid
         output_valid := true.B
-        when(next_code_pointer >= (2*code_width).U || io.in.last) {
+        when(code_buffer_ptr >= code_width.U || io.in.last) {
           // if the code buffer is about to overflow, just output instead
           buffer_state := BufferState.FULL
           io.in.ready := false.B
@@ -104,8 +187,8 @@ class Decoder[T <: UInt](gen: T, size: Int, code_width: Int, len_width: Int, cod
         }
       }.otherwise {
         // keep the code buffer and pointer the same
-        next_code_buffer   := code_buffer
-        next_code_pointer  := code_pointer
+        code_buffer_data := code_buffer_data
+        code_buffer_ptr  := code_buffer_ptr
         buffer_state := BufferState.FILL
         io.in.ready := true.B
         output_valid := false.B
@@ -114,10 +197,10 @@ class Decoder[T <: UInt](gen: T, size: Int, code_width: Int, len_width: Int, cod
     is(BufferState.FULL) {
       when (io.out.ready) {
         // shift out the code words in the buffer
-        next_code_buffer   := code_buffer >> curr_len
-        next_code_pointer  := code_pointer - curr_len
+        code_buffer_data := code_buffer_data >> curr_len
+        code_buffer_ptr  := code_buffer_ptr - curr_len
         output_valid := true.B
-        when(next_code_pointer >= (2*code_width).U || last_buffer) {
+        when(code_buffer_ptr >= (2*code_width).U || last_buffer) {
           buffer_state := BufferState.FULL
           io.in.ready := false.B
         } .otherwise {
@@ -126,8 +209,8 @@ class Decoder[T <: UInt](gen: T, size: Int, code_width: Int, len_width: Int, cod
         }
       } .otherwise {
         // keep the buffer the same
-        next_code_buffer   := code_buffer
-        next_code_pointer  := code_pointer
+        code_buffer_data := code_buffer_data
+        code_buffer_ptr  := code_buffer_ptr
         buffer_state := BufferState.FULL
         io.in.ready := false.B
         output_valid := false.B
@@ -135,56 +218,28 @@ class Decoder[T <: UInt](gen: T, size: Int, code_width: Int, len_width: Int, cod
     }
   }
 
-  // update the code buffer and pointer
-  code_buffer   := next_code_buffer
-  code_pointer  := next_code_pointer
+  // // set the code buffer values
+  // code_buffer_data   := next_code_buffer_data
+  // code_buffer_ptr    := next_code_buffer_ptr
 
-  // define a method to update the current lengths
-  def update_curr_data_and_len(data: UInt, len: UInt) {
-    curr_data := data
-    curr_len  := len
-  }
-
-  // bit mask for correctly comparing code buffer
-  val mask = (x: Int) => ((1<<x)-1).U
-
-  // map codes and lens to a list of conditions and actions
-  val cond_act_pairs = codes_lens.map( x => (
-    ((next_code_buffer & mask(x._2)) === x._1.U(x._2.W)) && (next_code_pointer >= x._2.U),
-    { () => update_curr_data_and_len(x._3.U, x._2.U) }
-  ))
-
-  // create the when context
-  var context = {
-    val (cond, action) = cond_act_pairs.head
-    when(cond)(action())
-  }
-  for((cond, action) <- cond_act_pairs.tail) {
-    context = context.elsewhen(cond)(action())
-  }
-  context.otherwise {
-    curr_data := 0.U
-    curr_len  := 0.U
-  }
-
-  // assign the output bits to the decoded word
-  io.out.bits   := curr_data
+  // set the outputs based on the lowest index
+  io.out.bits   := decoded_data(index)
   io.out.valid  := output_valid
+
 }
 
-class BufferedDecoder[T <: UInt](gen: T, size: Int, code_width: Int, len_width: Int, code_file: String, len_file: String) extends Module {
+class BufferedDecoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Module {
 
   // initialise IO
   val io = IO(new DecoderIO(gen))
 
   // initialise decoder
-  val decoder = Module( new Decoder[T](gen, size, code_width, len_width, code_file, len_file) )
+  val decoder = Module( new Decoder[T](gen, code_file, len_file) )
 
   // connect inputs with registers
   decoder.io.in.bits  := RegNext(io.in.bits)
   decoder.io.in.valid := RegNext(io.in.valid)
   decoder.io.in.last  := RegNext(io.in.last)
-  // io.in.ready := RegNext(decoder.io.in.ready)
   io.in.ready := decoder.io.in.ready
 
   // connect output directly

@@ -21,12 +21,13 @@ class DecoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
 
     // testing annotations
     val annotations = Seq(VerilatorBackendAnnotation,WriteVcdAnnotation)
+    // val annotations = Seq(WriteVcdAnnotation)
 
     behavior of "Decoder"
     it should s"be correct for $description (Decoder)" in {
       // create the DUT
-      test(new BufferedDecoder(UInt(8.W), 256, 10, 4,
-        "examples/code_table.dat", "examples/len_table.dat")).withAnnotations(annotations) { c =>
+      test(new BufferedDecoder(UInt(8.W), "examples/code_table.dat", "examples/len_table.dat")).withAnnotations(annotations) { c =>
+      // test(new Decoder(UInt(8.W), "examples/code_table.dat", "examples/len_table.dat")).withAnnotations(annotations) { c =>
 
         // convert to stream interfaces to StreamDriver
         val in  = new StreamDriver(c.io.in)

@@ -25,8 +25,8 @@ class EncoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
     behavior of "Encoder"
     it should s"be correct for $description (Encoder)" in {
       // create the DUT
-      test(new Encoder(UInt(8.W), 256, 10, 4,
-        "examples/code_table.dat", "examples/len_table.dat")).withAnnotations(annotations) { c =>
+      test(new Encoder(UInt(8.W), 256, 10,
+        "examples/encoder_code_table.bin", "examples/encoder_len_table.bin")).withAnnotations(annotations) { c =>
 
         // convert to stream interfaces to StreamDriver
         val in  = new StreamDriver(c.io.in)
