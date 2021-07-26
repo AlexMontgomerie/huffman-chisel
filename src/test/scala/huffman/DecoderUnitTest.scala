@@ -21,7 +21,6 @@ class DecoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
 
     // testing annotations
     val annotations = Seq(VerilatorBackendAnnotation,WriteVcdAnnotation)
-    // val annotations = Seq(WriteVcdAnnotation)
 
     behavior of "Decoder"
     it should s"be correct for $description (Decoder)" in {
@@ -63,6 +62,11 @@ class DecoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
   description = "a stream of alternating zeros and ones"
   seq_in = Seq(0x04, 0x10, 0x40, 0x00, 0x01).map(_.U)
   seq_out = Seq(0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00).map(_.U)
+  run_test(seq_in, seq_out, description)
+
+  description = "a stream of random symbols"
+  seq_in = Seq(0xbb, 0x87, 0x20, 0xfa, 0xd1, 0xdd, 0xfc, 0x06, 0xc7, 0xfe, 0xb0, 0x8c, 0x27, 0x43).map(_.U)
+  seq_out = Seq(0xc3, 0x87, 0x11, 0xc2, 0xa4, 0xc3, 0xab, 0x0b, 0x0f, 0xc2, 0x84, 0x5d, 0x2f, 0x0a).map(_.U)
   run_test(seq_in, seq_out, description)
 
 }

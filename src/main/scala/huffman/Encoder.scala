@@ -6,6 +6,7 @@ import chisel3.util._
 import chisel3.experimental.ChiselEnum
 import chisel3.util.experimental.loadMemoryFromFileInline
 import firrtl.annotations.MemoryLoadFileType
+import firrtl.FileUtils
 
 import chisel3.experimental.{annotate, ChiselAnnotation}
 // import firrtl.annotations.MemorySynthInit
@@ -15,7 +16,7 @@ class EncoderIO[T <: UInt](gen: T) extends Bundle {
   val out = Stream(gen)
 }
 
-class Encoder[T <: UInt](gen: T, size: Int, code_width: Int, code_file: String, len_file: String) extends Module {
+class Encoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Module {
 
   // // update annotations to allow FPGA synthesis
   // annotate(new ChiselAnnotation {
@@ -23,8 +24,13 @@ class Encoder[T <: UInt](gen: T, size: Int, code_width: Int, code_file: String, 
   //     MemorySynthInit
   // })
 
+  // parse the code and len tables
+  val codes = FileUtils.getLines(code_file).map(Integer.parseInt(_,16))
+  val lens  = FileUtils.getLines(len_file).map(Integer.parseInt(_,16))
+
   // get data widths
   val data_width = gen.getWidth
+  val code_width = lens.map(_.toInt).max
   val len_width  = ( log(code_width) / log(2.0) ).ceil.toInt
   val ptr_width  = ( log(2*code_width) / log(2.0) ).ceil.toInt
 
@@ -41,10 +47,10 @@ class Encoder[T <: UInt](gen: T, size: Int, code_width: Int, code_file: String, 
 
   // load the buffers from a file
   if (code_file.trim().nonEmpty) {
-    loadMemoryFromFileInline(code_mem, code_file, hexOrBinary=MemoryLoadFileType.Binary)
+    loadMemoryFromFileInline(code_mem, code_file, hexOrBinary=MemoryLoadFileType.Hex)
   }
   if (len_file.trim().nonEmpty) {
-    loadMemoryFromFileInline(len_mem, len_file, hexOrBinary=MemoryLoadFileType.Binary)
+    loadMemoryFromFileInline(len_mem, len_file, hexOrBinary=MemoryLoadFileType.Hex)
   }
 
   // set defaults for IO
@@ -63,11 +69,13 @@ class Encoder[T <: UInt](gen: T, size: Int, code_width: Int, code_file: String, 
     // is ready
     when ( code_pointer >= data_width.U ) {
       // shorten when the pointer is past the data width
-      code_buffer   := ( code_buffer | ( curr_code << code_pointer ) ) >> data_width.U
+      // code_buffer   := ( code_buffer | ( curr_code << code_pointer ) ) >> data_width.U
+      code_buffer   := ( code_buffer << curr_len ) | curr_code
       code_pointer  := code_pointer + curr_len - data_width.U
     } .otherwise {
       // append the codes
-      code_buffer   := code_buffer | ( curr_code << code_pointer )
+      // code_buffer   := code_buffer | ( curr_code << code_pointer )
+      code_buffer   := ( code_buffer << curr_len ) | curr_code
       code_pointer  := code_pointer + curr_len
     }
   } .otherwise {
@@ -80,7 +88,7 @@ class Encoder[T <: UInt](gen: T, size: Int, code_width: Int, code_file: String, 
   io.in.ready := io.out.ready
 
   // connect lower code_buffer bits to the output
-  io.out.bits   := code_buffer
+  io.out.bits   := code_buffer >> (code_pointer-data_width.U)
 
   // define output valid signal logic
   when ( ( RegNext(io.in.last) && ( code_pointer < data_width.U ) ) || ( code_pointer >= data_width.U ) ) {
@@ -97,13 +105,13 @@ class Encoder[T <: UInt](gen: T, size: Int, code_width: Int, code_file: String, 
   }
 }
 
-class BufferedEncoder[T <: UInt](gen: T, size: Int, code_width: Int, code_file: String, len_file: String) extends Module {
+class BufferedEncoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Module {
 
   // initialise IO
   val io = IO(new EncoderIO(gen))
 
   // initialise encoder
-  val encoder = Module( new Encoder[T](gen, size, code_width, code_file, len_file) )
+  val encoder = Module( new Encoder[T](gen, code_file, len_file) )
 
   // connect inputs with registers
   encoder.io.in.bits  := RegNext(io.in.bits)
