@@ -52,7 +52,7 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   val mask = (x: Int) => ((1<<x)-1).U
 
   // scale for size of buffer
-  val buffer_scale = 3
+  val buffer_scale = 4
 
   // parse the code and len tables
   val codes = FileUtils.getLines(code_file)
@@ -71,6 +71,7 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   val code_buffer_data  = RegInit(0.U((buffer_scale*code_width).W))
   val code_buffer_ptr   = RegInit(0.U((ptr_width).W))
 
+  // create a wire for the next buffer and pointer
   val next_code_buffer_data  = Wire(UInt((buffer_scale*code_width).W))
   val next_code_buffer_ptr   = Wire(UInt((ptr_width).W))
 
@@ -104,10 +105,10 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
       // create the LUT
       val lut = Module(new LookUpTable(UInt(i.W), code_data))
       // connect the input signal
-      lut.io.in := next_code_buffer_data
+      lut.io.in := next_code_buffer_data >> (next_code_buffer_ptr - i.U)
       // connect up the decoded data and valid signal
       decoded_data(i-1)   := lut.io.out
-      decoded_valid(i-1)  := lut.io.valid
+      decoded_valid(i-1)  := lut.io.valid && ( next_code_buffer_ptr >= (i-1).U )
     }
   }
 
@@ -116,18 +117,10 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
 
   // get the current code word length
   val curr_len = Wire(UInt(len_width.W))
-  when ( RegNext(input_valid) ) {
-    when ( one_decoded_valid && (code_buffer_ptr+data_width.U) >= index) {
-      curr_len := index + 1.U
-    } .otherwise {
-      curr_len := 0.U
-    }
+  when (one_decoded_valid) {
+    curr_len := index + 1.U
   } .otherwise {
-    when ( one_decoded_valid && code_buffer_ptr >= index ) {
-      curr_len := index + 1.U
-    } .otherwise {
-      curr_len := 0.U
-    }
+    curr_len := 0.U
   }
 
   // create a state machine for the buffer
@@ -140,7 +133,7 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   }
 
   // last signal logic
-  when(last_buffer && (code_buffer_ptr === curr_len) ) {
+  when(last_buffer && ( (code_buffer_ptr === 0.U) || !one_decoded_valid ) ) {
     io.out.last := true.B
   } .otherwise {
     io.out.last := false.B
@@ -149,58 +142,49 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   // valid signal for the output
   val output_valid = RegInit(false.B)
 
-  // assign a wire for the next code buffer data and pointer
-  // next_code_buffer_data := ( code_buffer_data >> curr_len ) | ( ( input_bits << (code_buffer_ptr-curr_len) ) & mask(buffer_scale*code_width) )
-  next_code_buffer_data := ( code_buffer_data | ( input_bits << code_buffer_ptr ) ) >> curr_len
-  next_code_buffer_ptr  := code_buffer_ptr + data_width.U - curr_len
-
-  // // code buffer update logic
-  // when(input_valid && io.out.ready) {
-  //   when(code_buffer_ptr <= code_width.U) {
-  //     code_buffer_data := next_code_buffer_data
-  //     code_buffer_ptr  := next_code_buffer_ptr
-  //   } .otherwise {
-  //     code_buffer_data := code_buffer_data >> curr_len
-  //     code_buffer_ptr  := code_buffer_ptr - curr_len
-  //   }
-  // } .otherwise {
-  //   code_buffer_data := code_buffer_data
-  //   code_buffer_ptr  := code_buffer_ptr
-  // }
+  // initial values for next code buffer and pointer
+  next_code_buffer_data  := code_buffer_data
+  next_code_buffer_ptr   := code_buffer_ptr
 
   switch(buffer_state) {
     is(BufferState.FILL) {
       when(input_valid && io.out.ready) {
         // only update the code buffer if the output is ready and the input is valid
-        code_buffer_data := next_code_buffer_data
-        code_buffer_ptr  := next_code_buffer_ptr
+        next_code_buffer_data := ( code_buffer_data << data_width.U ) | input_bits
+        next_code_buffer_ptr  := code_buffer_ptr + data_width.U - curr_len
         // set the output signal to valid
         output_valid := true.B
-        when(code_buffer_ptr >= code_width.U || io.in.last) {
+        when(code_buffer_ptr >= (2*code_width).U || io.in.last) {
           // if the code buffer is about to overflow, just output instead
           buffer_state := BufferState.FULL
+          // set the ready signal
           io.in.ready := false.B
         } .otherwise {
           // otherwise, stay in the current state
           buffer_state := BufferState.FILL
+          // set the ready signal
           io.in.ready := true.B
         }
       }.otherwise {
         // keep the code buffer and pointer the same
-        code_buffer_data := code_buffer_data
-        code_buffer_ptr  := code_buffer_ptr
+        next_code_buffer_data := code_buffer_data
+        next_code_buffer_ptr  := code_buffer_ptr
+        // update state
         buffer_state := BufferState.FILL
-        io.in.ready := true.B
+        // update valid signal
         output_valid := false.B
+        // set the ready signal
+        io.in.ready := true.B
       }
     }
     is(BufferState.FULL) {
       when (io.out.ready) {
         // shift out the code words in the buffer
-        code_buffer_data := code_buffer_data >> curr_len
-        code_buffer_ptr  := code_buffer_ptr - curr_len
+        next_code_buffer_data := code_buffer_data
+        next_code_buffer_ptr  := code_buffer_ptr - curr_len
+        // update valid signal
         output_valid := true.B
-        when(code_buffer_ptr >= (2*code_width).U || last_buffer) {
+        when(code_buffer_ptr >= (3*code_width).U || last_buffer) {
           buffer_state := BufferState.FULL
           io.in.ready := false.B
         } .otherwise {
@@ -209,8 +193,8 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
         }
       } .otherwise {
         // keep the buffer the same
-        code_buffer_data := code_buffer_data
-        code_buffer_ptr  := code_buffer_ptr
+        next_code_buffer_data := code_buffer_data
+        next_code_buffer_ptr  := code_buffer_ptr
         buffer_state := BufferState.FULL
         io.in.ready := false.B
         output_valid := false.B
@@ -218,13 +202,13 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
     }
   }
 
-  // // set the code buffer values
-  // code_buffer_data   := next_code_buffer_data
-  // code_buffer_ptr    := next_code_buffer_ptr
+  // update code buffer and pointer
+  code_buffer_data  := next_code_buffer_data
+  code_buffer_ptr   := next_code_buffer_ptr
 
   // set the outputs based on the lowest index
-  io.out.bits   := decoded_data(index)
-  io.out.valid  := output_valid
+  io.out.bits   := RegNext(decoded_data(index))
+  io.out.valid  := RegNext(output_valid && one_decoded_valid)
 
 }
 
