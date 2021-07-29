@@ -28,6 +28,10 @@ class Encoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   val codes = FileUtils.getLines(code_file).map(Integer.parseInt(_,16))
   val lens  = FileUtils.getLines(len_file).map(Integer.parseInt(_,16))
 
+  // get the min and max lengths
+  val min_len = lens.map(_.toInt).min
+  val max_len = lens.map(_.toInt).max
+
   // get data widths
   val data_width = gen.getWidth
   val code_width = lens.map(_.toInt).max
@@ -42,8 +46,8 @@ class Encoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   val len_mem  = SyncReadMem(pow(2,data_width).toInt, UInt(len_width.W))
 
   // create a buffer and pointer
-  val code_buffer   = RegInit(0.U((2*code_width).W))
-  val code_pointer  = RegInit(0.U((ptr_width).W))
+  val code_buffer_data  = RegInit(0.U((2*code_width).W))
+  val code_buffer_ptr   = RegInit(0.U((ptr_width).W))
 
   // load the buffers from a file
   if (code_file.trim().nonEmpty) {
@@ -59,50 +63,163 @@ class Encoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   io.out.last   := false.B
   io.in.ready   := false.B
 
+  // registers for the inputs
+  val input_bits  = RegNext(io.in.bits)
+  val input_valid = RegNext(io.in.valid)
+  val input_last  = io.in.last
+
   // get the code word and length
   val curr_code = code_mem.read(io.in.bits, io.in.valid)
   val curr_len  = len_mem.read(io.in.bits, io.in.valid)
 
-  // code buffer logic
-  when ( RegNext(io.in.valid) && io.out.ready ) {
-    // only update the buffer and pointer if the input is valid and the output
-    // is ready
-    when ( code_pointer >= data_width.U ) {
-      // shorten when the pointer is past the data width
-      // code_buffer   := ( code_buffer | ( curr_code << code_pointer ) ) >> data_width.U
-      code_buffer   := ( code_buffer << curr_len ) | curr_code
-      code_pointer  := code_pointer + curr_len - data_width.U
-    } .otherwise {
-      // append the codes
-      // code_buffer   := code_buffer | ( curr_code << code_pointer )
-      code_buffer   := ( code_buffer << curr_len ) | curr_code
-      code_pointer  := code_pointer + curr_len
-    }
-  } .otherwise {
-    // keep the code buffer as is
-    code_buffer   := code_buffer
-    code_pointer  := code_pointer
+  // valid signal for the output
+  val output_valid = RegInit(false.B)
+
+  // a latch to detect the last output
+  val last_buffer = RegInit(false.B)
+  when(io.in.last) {
+    last_buffer := true.B
   }
 
-  // connect ready signal straight through
-  io.in.ready := io.out.ready
+  // create a state machine for the buffer
+  val buffer_state = RegInit(BufferState.EMPTY)
+
+  switch(buffer_state) {
+    is(BufferState.EMPTY) {
+      when(input_valid && io.out.ready) {
+        val next_ptr = code_buffer_ptr + curr_len
+        code_buffer_data := ( code_buffer_data << curr_len ) | curr_code
+        code_buffer_ptr   := next_ptr
+        when(last_buffer) {
+          buffer_state := BufferState.DONE
+          output_valid  := true.B
+          io.in.ready   := false.B
+        } .elsewhen(next_ptr >= data_width.U) {
+          buffer_state := BufferState.FILL
+          output_valid  := true.B
+          io.in.ready   := true.B
+        } .otherwise {
+          buffer_state := BufferState.EMPTY
+          output_valid  := false.B
+          io.in.ready   := true.B
+        }
+      } .otherwise {
+        // keep the code buffer and pointer the same
+        code_buffer_data := code_buffer_data
+        code_buffer_ptr  := code_buffer_ptr
+        // update state
+        buffer_state := BufferState.EMPTY
+        // update valid signal
+        output_valid := false.B
+        // set the ready signal
+        io.in.ready := true.B
+      }
+    }
+    is(BufferState.FILL) {
+      when(input_valid && io.out.ready) {
+        //
+        val next_ptr = code_buffer_ptr + curr_len - data_width.U
+        code_buffer_data := ( code_buffer_data << curr_len ) | curr_code
+        code_buffer_ptr   := next_ptr
+        val next_buffer_state = WireDefault(BufferState.FILL)
+        when(last_buffer) {
+          buffer_state := BufferState.DONE
+          output_valid  := true.B
+          io.in.ready   := false.B
+        } .elsewhen(next_ptr >= (2*data_width).U) {
+          buffer_state := BufferState.FULL
+          output_valid  := true.B
+          io.in.ready   := false.B
+        } .elsewhen(next_ptr >= data_width.U) {
+          buffer_state := BufferState.FILL
+          output_valid  := true.B
+          io.in.ready   := true.B
+        } .otherwise {
+          buffer_state := BufferState.EMPTY
+          output_valid  := false.B
+          io.in.ready   := true.B
+        }
+      } .otherwise {
+        // keep the code buffer and pointer the same
+        code_buffer_data := code_buffer_data
+        code_buffer_ptr  := code_buffer_ptr
+        // update state
+        buffer_state := BufferState.FILL
+        // update valid signal
+        output_valid := false.B
+        // set the ready signal
+        io.in.ready := true.B
+      }
+    }
+    is(BufferState.FULL) {
+      when(io.out.ready) {
+        // update the code buffer pointer
+        code_buffer_data := code_buffer_data
+        val next_ptr = code_buffer_ptr - data_width.U
+        code_buffer_ptr   := next_ptr
+        when(last_buffer){
+          buffer_state := BufferState.DONE
+          output_valid  := true.B
+          io.in.ready   := false.B
+        } .elsewhen(next_ptr >= (2*data_width).U) {
+          buffer_state := BufferState.FULL
+          output_valid  := true.B
+          io.in.ready   := false.B
+        } .elsewhen(next_ptr >= data_width.U) {
+          buffer_state := BufferState.FILL
+          output_valid  := true.B
+          io.in.ready   := true.B
+        } .otherwise {
+          buffer_state := BufferState.EMPTY
+          output_valid  := false.B
+          io.in.ready   := true.B
+        }
+      } .otherwise {
+        // keep the code buffer and pointer the same
+        code_buffer_data := code_buffer_data
+        code_buffer_ptr  := code_buffer_ptr
+        // update state
+        buffer_state := BufferState.FULL
+        // update valid signal
+        output_valid := false.B
+        // set the ready signal
+        io.in.ready := true.B
+      }
+    }
+    is(BufferState.DONE) {
+      when(io.out.ready) {
+        code_buffer_data := code_buffer_data
+        code_buffer_ptr := code_buffer_ptr - data_width.U
+        buffer_state := BufferState.DONE
+        output_valid  := true.B
+        io.in.ready   := false.B
+      } .otherwise {
+        // keep the code buffer and pointer the same
+        code_buffer_data := code_buffer_data
+        code_buffer_ptr  := code_buffer_ptr
+        // update state
+        buffer_state := BufferState.DONE
+        // update valid signal
+        output_valid := false.B
+        // set the ready signal
+        io.in.ready := true.B
+        io.out.bits := code_buffer_data >> (code_buffer_ptr - data_width.U)
+      }
+    }
+  }
 
   // connect lower code_buffer bits to the output
-  io.out.bits   := code_buffer >> (code_pointer-data_width.U)
+  io.out.bits := (code_buffer_data << data_width.U) >> code_buffer_ptr
+  io.out.valid  := output_valid
 
-  // define output valid signal logic
-  when ( ( RegNext(io.in.last) && ( code_pointer < data_width.U ) ) || ( code_pointer >= data_width.U ) ) {
-    io.out.valid := true.B
-  } .otherwise {
-    io.out.valid := false.B
-  }
-
-  // define output last signal logic
-  when ( RegNext(io.in.last) && ( code_pointer < data_width.U ) ) {
+  // last signal logic
+  when(buffer_state === BufferState.DONE && last_buffer && (code_buffer_ptr.asSInt <= data_width.S) ) {
     io.out.last := true.B
+    last_buffer := false.B
   } .otherwise {
-    io.out.last   := RegNext(RegNext(io.in.last))
+    io.out.last := false.B
   }
+
 }
 
 class BufferedEncoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Module {
@@ -113,11 +230,22 @@ class BufferedEncoder[T <: UInt](gen: T, code_file: String, len_file: String) ex
   // initialise encoder
   val encoder = Module( new Encoder[T](gen, code_file, len_file) )
 
-  // connect inputs with registers
-  encoder.io.in.bits  := RegNext(io.in.bits)
-  encoder.io.in.valid := RegNext(io.in.valid)
-  encoder.io.in.last  := RegNext(io.in.last)
-  io.in.ready := encoder.io.in.ready
+  // get the data width
+  val data_width = gen.getWidth
+
+  // create a queue for incoming samples
+  val queue = Module(new Queue(Bits((data_width+1).W), 2)).io
+
+  // connect the input of the queue
+  queue.enq.bits := Cat(io.in.last, io.in.bits)
+  queue.enq.valid := io.in.valid
+  io.in.ready := queue.enq.ready
+
+  // connect the output of the queue to the encoder
+  encoder.io.in.bits  := queue.deq.bits
+  encoder.io.in.valid := queue.deq.valid
+  encoder.io.in.last  := queue.deq.bits >> data_width
+  queue.deq.ready := encoder.io.in.ready
 
   // connect output directly
   io.out.bits   := encoder.io.out.bits

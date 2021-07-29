@@ -9,7 +9,7 @@ import chisel3.experimental.ChiselEnum
 import firrtl.FileUtils
 
 object BufferState extends ChiselEnum {
-  val FILL, FULL = Value
+  val EMPTY, FILL, FULL, DONE = Value
 }
 
 class DecoderIO[T <: UInt](gen: T) extends Bundle {
@@ -132,13 +132,6 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
     last_buffer := true.B
   }
 
-  // last signal logic
-  when(last_buffer && ( (code_buffer_ptr === 0.U) || !one_decoded_valid ) ) {
-    io.out.last := true.B
-  } .otherwise {
-    io.out.last := false.B
-  }
-
   // valid signal for the output
   val output_valid = RegInit(false.B)
 
@@ -210,6 +203,13 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   io.out.bits   := RegNext(decoded_data(index))
   io.out.valid  := RegNext(output_valid && one_decoded_valid)
 
+  // last signal logic
+  when(last_buffer && ( (code_buffer_ptr === 0.U) || !one_decoded_valid ) ) {
+    io.out.last := true.B
+  } .otherwise {
+    io.out.last := false.B
+  }
+
 }
 
 class BufferedDecoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Module {
@@ -220,11 +220,22 @@ class BufferedDecoder[T <: UInt](gen: T, code_file: String, len_file: String) ex
   // initialise decoder
   val decoder = Module( new Decoder[T](gen, code_file, len_file) )
 
-  // connect inputs with registers
-  decoder.io.in.bits  := RegNext(io.in.bits)
-  decoder.io.in.valid := RegNext(io.in.valid)
-  decoder.io.in.last  := RegNext(io.in.last)
-  io.in.ready := decoder.io.in.ready
+  // get the data width
+  val data_width = gen.getWidth
+
+  // create a queue for incoming samples
+  val queue = Module(new Queue(Bits((data_width+1).W), 2)).io
+
+  // connect the input of the queue
+  queue.enq.bits := Cat(io.in.last, io.in.bits)
+  queue.enq.valid := io.in.valid
+  io.in.ready := queue.enq.ready
+
+  // connect the output of the queue to the decoder
+  decoder.io.in.bits  := queue.deq.bits
+  decoder.io.in.valid := queue.deq.valid
+  decoder.io.in.last  := queue.deq.bits >> data_width
+  queue.deq.ready := decoder.io.in.ready
 
   // connect output directly
   io.out.bits   := decoder.io.out.bits
