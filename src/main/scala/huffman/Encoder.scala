@@ -9,7 +9,7 @@ import firrtl.annotations.MemoryLoadFileType
 import firrtl.FileUtils
 
 import chisel3.experimental.{annotate, ChiselAnnotation}
-// import firrtl.annotations.MemorySynthInit
+import firrtl.annotations.MemorySynthInit
 
 class EncoderIO[T <: UInt](gen: T) extends Bundle {
   val in  = Flipped(Stream(gen))
@@ -18,11 +18,11 @@ class EncoderIO[T <: UInt](gen: T) extends Bundle {
 
 class Encoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Module {
 
-  // // update annotations to allow FPGA synthesis
-  // annotate(new ChiselAnnotation {
-  //   override def toFirrtl =
-  //     MemorySynthInit
-  // })
+  // update annotations to allow FPGA synthesis
+  annotate(new ChiselAnnotation {
+    override def toFirrtl =
+      MemorySynthInit
+  })
 
   // parse the code and len tables
   val codes = FileUtils.getLines(code_file).map(Integer.parseInt(_,16))
