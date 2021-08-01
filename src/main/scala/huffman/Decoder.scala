@@ -32,13 +32,13 @@ class LookUpTable[T <: UInt](gen: T, data_width: Int, code_data: Seq[(Int,Int)])
   // generate the LUT
   var context = {
     val (code, data) = code_data.head
-    when(io.in === code.U) {
+    when(io.in === Reverse(code.U(code_width.W))) {
       io.out := data.U
       io.valid := true.B
     }
   }
   for((code, data) <- code_data.tail) {
-    context = context.elsewhen(io.in === code.U) {
+    context = context.elsewhen(io.in === Reverse(code.U(code_width.W))) {
       io.out := data.U
       io.valid := true.B
     }
@@ -55,7 +55,7 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   val mask = (x: Int) => ((1<<x)-1).U
 
   // scale for size of buffer
-  val buffer_scale = 3
+  val buffer_scale = 5
 
   // parse the code and len tables
   val codes = FileUtils.getLines(code_file)
@@ -88,7 +88,7 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   io.in.ready   := true.B
 
   // registered input signals
-  val input_bits  = io.in.bits
+  val input_bits  = Reverse(io.in.bits)
   val input_valid = io.in.valid
 
   // initialise decoder for each width
@@ -99,7 +99,23 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   val one_decoded_valid = decoded_valid.reduce(_|_)
 
   // find the smallest decoded value
-  val index = PriorityEncoder(decoded_valid)
+  // val index = PriorityEncoder(decoded_valid)
+  val index = RegInit(0.U(len_width.W))
+
+  // generate the priority encoder
+  var priority_encoder = {
+    when(decoded_valid(0)) {
+      index := 0.U
+    }
+  }
+  for(i <- 1 to code_width-1) {
+    priority_encoder = priority_encoder.elsewhen(decoded_valid(i)) {
+      index := i.U
+    }
+  }
+  // priority_encoder.otherwise {
+  //   index := 0.U
+  // }
 
   // get the current code word length
   val curr_len = Wire(UInt(len_width.W))
@@ -119,9 +135,10 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   // iterate over look up tables to intialise the decoded_data output
   lut.foreach {
     case(i, lut_hw) => {
-      lut_hw.in := DontCare
+      lut_hw.in := ( ( (input_bits << code_buffer_ptr) & mask(code_width*2) ) | code_buffer_data & mask(code_width*2) ) >> curr_len
       decoded_data(i)   := lut_hw.out
-      decoded_valid(i)  := false.B
+      // decoded_valid(i)  := lut_hw.valid && input_valid && (code_buffer_ptr > (i+1).U)
+      decoded_valid(i)  := lut_hw.valid
     }
   }
 
@@ -141,15 +158,8 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
     is(BufferState.EMPTY) {
       when(input_valid) {
         // get the next value
-        val next_code_buffer_data = ( code_buffer_data << data_width.U ) | input_bits
+        val next_code_buffer_data = ( ( input_bits << code_buffer_ptr ) | code_buffer_data ) >> curr_len
         val next_code_buffer_ptr  = code_buffer_ptr + data_width.U
-        // iterate over look up tables to intialise the decoded_data output
-        lut.foreach {
-          case(i, lut_hw) => {
-            lut_hw.in := next_code_buffer_data >> ( next_code_buffer_ptr - (i+1).U )
-            decoded_valid(i)  := lut_hw.valid && ( next_code_buffer_ptr >= (i+1).U )
-          }
-        }
         // only update the code buffer
         code_buffer_data := next_code_buffer_data
         code_buffer_ptr  := next_code_buffer_ptr
@@ -163,13 +173,6 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
           output_valid := false.B
         }
       }.otherwise {
-        // iterate over look up tables to intialise the decoded_data output
-        lut.foreach {
-          case(i, lut_hw) => {
-            lut_hw.in := code_buffer_data >> ( code_buffer_ptr - (i+1).U )
-            decoded_valid(i)  := lut_hw.valid && ( code_buffer_ptr >= (i+1).U )
-          }
-        }
         // keep the code buffer and pointer the same
         code_buffer_data := code_buffer_data
         code_buffer_ptr  := code_buffer_ptr
@@ -185,15 +188,8 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
     is(BufferState.FILL) {
       when(input_valid && io.out.ready) {
         // get the next value
-        val next_code_buffer_data = ( code_buffer_data << data_width.U ) | input_bits
+        val next_code_buffer_data = ( ( input_bits << code_buffer_ptr ) | code_buffer_data ) >> curr_len
         val next_code_buffer_ptr  = code_buffer_ptr + data_width.U - curr_len
-        // iterate over look up tables to intialise the decoded_data output
-        lut.foreach {
-          case(i, lut_hw) => {
-            lut_hw.in := next_code_buffer_data >> (next_code_buffer_ptr - (i+1).U)
-            decoded_valid(i)  := lut_hw.valid && ( next_code_buffer_ptr >= (i+1).U )
-          }
-        }
         // only update the code buffer
         code_buffer_data := next_code_buffer_data
         code_buffer_ptr  := next_code_buffer_ptr
@@ -204,19 +200,12 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
           io.in.ready := false.B
         } .elsewhen(next_code_buffer_ptr < min_len.U) {
           buffer_state := BufferState.EMPTY
-          io.in.ready := false.B
+          io.in.ready := true.B
         } .otherwise {
           buffer_state := BufferState.FILL
           io.in.ready := true.B
         }
       }.otherwise {
-        // iterate over look up tables to intialise the decoded_data output
-        lut.foreach {
-          case(i, lut_hw) => {
-            lut_hw.in := code_buffer_data >> ( code_buffer_ptr - (i+1).U )
-            decoded_valid(i)  := lut_hw.valid && ( code_buffer_ptr >= (i+1).U )
-          }
-        }
         // keep the code buffer and pointer the same
         code_buffer_data := code_buffer_data
         code_buffer_ptr  := code_buffer_ptr
@@ -231,21 +220,14 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
     is(BufferState.FULL) {
       when (io.out.ready) {
         // get the next value
-        val next_code_buffer_data = code_buffer_data
+        val next_code_buffer_data =  code_buffer_data >> curr_len
         val next_code_buffer_ptr  = code_buffer_ptr - curr_len
-        // iterate over look up tables to intialise the decoded_data output
-        lut.foreach {
-          case(i, lut_hw) => {
-            lut_hw.in := next_code_buffer_data >> (next_code_buffer_ptr - (i+1).U)
-            decoded_valid(i)  := lut_hw.valid && ( next_code_buffer_ptr >= (i+1).U )
-          }
-        }
         // only update the code buffer
         code_buffer_data := next_code_buffer_data
         code_buffer_ptr  := next_code_buffer_ptr
         // update valid signal
         output_valid := true.B
-        when(next_code_buffer_ptr > (2*code_width).U || io.in.last || last_buffer) {
+        when(next_code_buffer_ptr > (2*max_len).U || io.in.last || last_buffer) {
           buffer_state := BufferState.FULL
           io.in.ready := false.B
         } .otherwise {
@@ -253,13 +235,6 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
           io.in.ready := true.B
         }
       } .otherwise {
-        // iterate over look up tables to intialise the decoded_data output
-        lut.foreach {
-          case(i, lut_hw) => {
-            lut_hw.in := code_buffer_data >> ( code_buffer_ptr - (i+1).U )
-            decoded_valid(i)  := lut_hw.valid && ( code_buffer_ptr >= (i+1).U )
-          }
-        }
         // keep the buffer the same
         code_buffer_data := code_buffer_data
         code_buffer_ptr  := code_buffer_ptr
@@ -275,11 +250,12 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   // code_buffer_ptr   := next_code_buffer_ptr
 
   // set the outputs based on the lowest index
-  // io.out.bits   := decoded_data(index)
+  io.out.bits   := decoded_data(index)
   // io.out.valid  := output_valid && one_decoded_valid
+  io.out.valid  := false.B
 
-  io.out.bits   := RegNext(decoded_data(index))
-  io.out.valid  := RegNext(output_valid && one_decoded_valid)
+  // io.out.bits   := RegNext(decoded_data(index))
+  // io.out.valid  := RegNext(output_valid && one_decoded_valid)
 
   // last signal logic
   when(last_buffer && ( (code_buffer_ptr === 0.U) || !one_decoded_valid ) ) {
