@@ -1,0 +1,4 @@
+Setup :            0  Failing Endpoints,  Worst Slack        2.141ns,  Total Violation        0.000ns
+Hold  :            0  Failing Endpoints,  Worst Slack        0.094ns,  Total Violation        0.000ns
+PW    :            0  Failing Endpoints,  Worst Slack        1.154ns,  Total Violation        0.000ns
+Min Period        n/a     FDRE/C   n/a            0.550         2.857       2.307                buffer_state_reg[0]/C
