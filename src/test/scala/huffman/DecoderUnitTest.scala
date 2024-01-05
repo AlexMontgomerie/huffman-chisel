@@ -40,8 +40,6 @@ class DecoderTest extends FlatSpec with ChiselScalatestTester with Matchers {
           in.enqueueSeq(seq_in),
           out.expectDequeueSeq(seq_out)
         )
-        // c.io.out.ready.poke(true.B)
-        // fork { in.enqueueSeq(seq_in) }.join
 
       }
     }

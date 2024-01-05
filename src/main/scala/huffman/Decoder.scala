@@ -99,23 +99,7 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
   val one_decoded_valid = decoded_valid.reduce(_|_)
 
   // find the smallest decoded value
-  // val index = PriorityEncoder(decoded_valid)
-  val index = RegInit(0.U(len_width.W))
-
-  // generate the priority encoder
-  var priority_encoder = {
-    when(decoded_valid(0)) {
-      index := 0.U
-    }
-  }
-  for(i <- 1 to code_width-1) {
-    priority_encoder = priority_encoder.elsewhen(decoded_valid(i)) {
-      index := i.U
-    }
-  }
-  // priority_encoder.otherwise {
-  //   index := 0.U
-  // }
+  val index = PriorityEncoder(decoded_valid)
 
   // get the current code word length
   val curr_len = Wire(UInt(len_width.W))
@@ -251,8 +235,8 @@ class Decoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Mo
 
   // set the outputs based on the lowest index
   io.out.bits   := decoded_data(index)
-  // io.out.valid  := output_valid && one_decoded_valid
-  io.out.valid  := false.B
+  io.out.valid  := output_valid && one_decoded_valid
+  // io.out.valid  := false.B
 
   // io.out.bits   := RegNext(decoded_data(index))
   // io.out.valid  := RegNext(output_valid && one_decoded_valid)

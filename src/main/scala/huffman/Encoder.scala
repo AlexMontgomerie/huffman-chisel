@@ -18,15 +18,15 @@ class EncoderIO[T <: UInt](gen: T) extends Bundle {
 
 class Encoder[T <: UInt](gen: T, code_file: String, len_file: String) extends Module {
 
-  // update annotations to allow FPGA synthesis
-  annotate(new ChiselAnnotation {
-    override def toFirrtl =
-      MemorySynthInit
-  })
+  // // update annotations to allow FPGA synthesis
+  // annotate(new ChiselAnnotation {
+  //   override def toFirrtl =
+  //     MemorySynthInit
+  // })
 
   // parse the code and len tables
-  val codes = FileUtils.getLines(code_file).map(Integer.parseInt(_,16))
-  val lens  = FileUtils.getLines(len_file).map(Integer.parseInt(_,16))
+  val codes = FileUtils.getLines(code_file)
+  val lens  = FileUtils.getLines(len_file)
 
   // get the min and max lengths
   val min_len = lens.map(_.toInt).min
